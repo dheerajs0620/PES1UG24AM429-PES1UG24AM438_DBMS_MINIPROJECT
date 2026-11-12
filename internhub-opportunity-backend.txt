@@ -1,0 +1,808 @@
+INTERNHUB OPPORTUNITY BACKEND
+
+========== app/api/extract-cv/route.ts ==========
+import { NextResponse } from 'next/server';
+import { mysqlPool } from '@/lib/mysql';
+
+export const runtime = 'nodejs';
+
+type SkillPattern = {
+  name: string;
+  patterns: RegExp[];
+};
+
+type OpportunityMatch = {
+  opportunity_id: number;
+  title: string;
+  opportunity_type: string;
+  description: string;
+  required_skills: string | null;
+  company_name: string;
+  requiredSkills: string[];
+  preferredSkills: string[];
+};
+
+const taxonomy: SkillPattern[] = [
+  { name: 'Python', patterns: [/\bpython\b/i] },
+  { name: 'C', patterns: [/\bc programming\b/i, /\bc language\b/i, /\bbare-metal c\b/i] },
+  { name: 'C++', patterns: [/\bc\+\+\b/i, /\bcpp\b/i] },
+  { name: 'Rust', patterns: [/\brust\b/i] },
+  { name: 'JavaScript', patterns: [/\bjavascript\b/i] },
+  { name: 'TypeScript', patterns: [/\btypescript\b/i] },
+  { name: 'React', patterns: [/\breact(?:\.js|js)?\b/i] },
+  { name: 'Next.js', patterns: [/\bnext\.js\b/i, /\bnextjs\b/i] },
+  { name: 'Node.js', patterns: [/\bnode\.js\b/i, /\bnodejs\b/i] },
+  { name: 'Express.js', patterns: [/\bexpress(?:\.js)?\b/i] },
+  { name: 'FastAPI', patterns: [/\bfastapi\b/i] },
+  { name: 'MySQL', patterns: [/\bmysql\b/i] },
+  { name: 'PostgreSQL', patterns: [/\bpostgres(?:ql)?\b/i, /\bpgvector\b/i] },
+  { name: 'MongoDB', patterns: [/\bmongodb\b/i, /\bmongo database\b/i] },
+  { name: 'Neo4j', patterns: [/\bneo4j\b/i] },
+  { name: 'Redis', patterns: [/\bredis\b/i] },
+  { name: 'ChromaDB', patterns: [/\bchromadb\b/i] },
+  { name: 'PyTorch', patterns: [/\bpytorch\b/i] },
+  { name: 'TensorFlow', patterns: [/\btensorflow\b/i] },
+  { name: 'OpenCV', patterns: [/\bopencv\b/i] },
+  { name: 'Docker', patterns: [/\bdocker\b/i] },
+  { name: 'Kubernetes', patterns: [/\bkubernetes\b/i, /\bk8s\b/i] },
+  { name: 'Wazuh', patterns: [/\bwazuh\b/i] },
+  { name: 'Machine Learning', patterns: [/\bmachine learning\b/i] },
+  { name: 'Computer Vision', patterns: [/\bcomputer vision\b/i] },
+  {
+    name: 'Natural Language Processing',
+    patterns: [
+      /\bnatural language processing\b/i,
+      /\bnlp\b/i,
+      /\brag\b/i,
+      /\blarge language models?\b/i,
+      /\bllm\b/i,
+      /\blangchain\b/i,
+      /\blanggraph\b/i,
+      /\bgenerative ai\b/i,
+      /\bgen ai\b/i,
+    ],
+  },
+  { name: 'Git', patterns: [/\bgit\b/i, /\bgithub\b/i] },
+];
+
+const aliases: Record<string, string> = {
+  nlp: 'Natural Language Processing',
+  'express': 'Express.js',
+  'node': 'Node.js',
+  postgres: 'PostgreSQL',
+  postgresql: 'PostgreSQL',
+  k8s: 'Kubernetes',
+};
+
+function normalizeSkill(skill: string): string {
+  const cleaned = skill.trim();
+  const alias = aliases[cleaned.toLowerCase()];
+  return alias || cleaned;
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const cvText = typeof body.cvText === 'string' ? body.cvText : '';
+
+    if (!cvText.trim()) {
+      return NextResponse.json(
+        { success: false, error: 'No text content found in uploaded CV.' },
+        { status: 400 }
+      );
+    }
+
+    if (cvText.length > 2_000_000) {
+      return NextResponse.json(
+        { success: false, error: 'CV text is too large to process.' },
+        { status: 413 }
+      );
+    }
+
+    // Extract skills using explicit phrases and conservative aliases.
+    const extractedSkills = taxonomy
+      .filter((item) => item.patterns.some((pattern) => pattern.test(cvText)))
+      .map((item) => normalizeSkill(item.name));
+
+    const uniqueSkills = Array.from(new Set(extractedSkills));
+    const candidateSkillSet = new Set(
+      uniqueSkills.map((skill) => skill.toLowerCase())
+    );
+
+    // Read the actual required/preferred skill mappings from MySQL.
+    const [rows]: any = await mysqlPool.query(`
+      SELECT
+        o.opportunity_id,
+        o.title,
+        o.opportunity_type,
+        o.description,
+        o.required_skills,
+        c.name AS company_name,
+        s.skill_name,
+        os.requirement_type
+      FROM Opportunities o
+      INNER JOIN Companies c
+        ON c.company_id = o.company_id
+      LEFT JOIN opportunity_skills os
+        ON os.opportunity_id = o.opportunity_id
+      LEFT JOIN skills s
+        ON s.skill_id = os.skill_id
+      ORDER BY o.opportunity_id
+    `);
+
+    const opportunities = new Map<number, OpportunityMatch>();
+
+    for (const row of rows) {
+      let opportunity = opportunities.get(Number(row.opportunity_id));
+
+      if (!opportunity) {
+        opportunity = {
+          opportunity_id: Number(row.opportunity_id),
+          title: row.title,
+          opportunity_type: row.opportunity_type,
+          description: row.description,
+          required_skills: row.required_skills,
+          company_name: row.company_name,
+          requiredSkills: [],
+          preferredSkills: [],
+        };
+
+        opportunities.set(opportunity.opportunity_id, opportunity);
+      }
+
+      if (row.skill_name) {
+        const skillName = normalizeSkill(String(row.skill_name));
+        const requirementType = String(row.requirement_type || 'REQUIRED').toUpperCase();
+
+        if (requirementType === 'PREFERRED') {
+          if (!opportunity.preferredSkills.includes(skillName)) {
+            opportunity.preferredSkills.push(skillName);
+          }
+        } else {
+          if (!opportunity.requiredSkills.includes(skillName)) {
+            opportunity.requiredSkills.push(skillName);
+          }
+        }
+      }
+    }
+
+    const recommendations = Array.from(opportunities.values()).map((opp) => {
+      const matchedRequiredSkills = opp.requiredSkills.filter((skill) =>
+        candidateSkillSet.has(skill.toLowerCase())
+      );
+
+      const missingRequiredSkills = opp.requiredSkills.filter(
+        (skill) => !candidateSkillSet.has(skill.toLowerCase())
+      );
+
+      const matchedPreferredSkills = opp.preferredSkills.filter((skill) =>
+        candidateSkillSet.has(skill.toLowerCase())
+      );
+
+      const requiredRatio =
+        opp.requiredSkills.length > 0
+          ? matchedRequiredSkills.length / opp.requiredSkills.length
+          : null;
+
+      const preferredRatio =
+        opp.preferredSkills.length > 0
+          ? matchedPreferredSkills.length / opp.preferredSkills.length
+          : null;
+
+      // Required skills carry 80% weight; preferred skills carry 20%.
+      // If one category is absent, the available category is normalized to 100%.
+      let score = 0;
+
+      if (requiredRatio !== null && preferredRatio !== null) {
+        score = 0.8 * requiredRatio + 0.2 * preferredRatio;
+      } else if (requiredRatio !== null) {
+        score = requiredRatio;
+      } else if (preferredRatio !== null) {
+        score = preferredRatio;
+      }
+
+      const matchedSkills = [
+        ...matchedRequiredSkills,
+        ...matchedPreferredSkills,
+      ];
+
+      return {
+        opportunity_id: opp.opportunity_id,
+        title: opp.title,
+        opportunity_type: opp.opportunity_type,
+        description: opp.description,
+        required_skills: opp.required_skills,
+        company_name: opp.company_name,
+
+        // Keep this as a 0–1 decimal because the existing UI multiplies by 100.
+        match_score: Number(score.toFixed(4)),
+
+        matched_skills: matchedSkills,
+        matched_required_skills: matchedRequiredSkills,
+        missing_required_skills: missingRequiredSkills,
+        matched_preferred_skills: matchedPreferredSkills,
+
+        score_breakdown: {
+          required_matched: matchedRequiredSkills.length,
+          required_total: opp.requiredSkills.length,
+          preferred_matched: matchedPreferredSkills.length,
+          preferred_total: opp.preferredSkills.length,
+          required_weight: requiredRatio !== null && preferredRatio !== null ? 80 : 100,
+          preferred_weight: requiredRatio !== null && preferredRatio !== null ? 20 : 0,
+        },
+      };
+    });
+
+    recommendations.sort(
+      (a, b) =>
+        b.match_score - a.match_score ||
+        a.title.localeCompare(b.title)
+    );
+
+    return NextResponse.json({
+      success: true,
+      extracted_skills: uniqueSkills,
+      recommendations,
+    });
+  } catch (error: any) {
+    console.error('CV Extraction Error:', error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: error.message || 'Error processing CV text.',
+      },
+      { status: 500 }
+    );
+  }
+}
+
+========== app/api/opportunities/route.ts ==========
+import { NextResponse } from 'next/server';
+import { mysqlPool } from '@/lib/mysql';
+import { pgPool } from '@/lib/postgres';
+
+// 1. GET: Fetch all companies & postings for admin
+export async function GET() {
+  try {
+    const [rows]: any = await mysqlPool.query(
+      `SELECT o.opportunity_id, o.title, o.opportunity_type, o.description, 
+              o.required_skills, c.company_id, c.name AS company_name
+       FROM Opportunities o
+       JOIN Companies c ON o.company_id = c.company_id
+       ORDER BY o.opportunity_id DESC`
+    );
+    return NextResponse.json({ success: true, opportunities: rows });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+// 2. POST: Create or Update an Opportunity (Company Side)
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const { opportunity_id, company_name, title, opportunity_type, description, required_skills } = body;
+
+    if (!company_name || !title || !description) {
+      return NextResponse.json(
+        { success: false, error: 'Company Name, Title, and Description are required.' },
+        { status: 400 }
+      );
+    }
+
+    // A. Check or Create Company in MySQL
+    const [companyRows]: any = await mysqlPool.query(
+      `SELECT company_id FROM Companies WHERE name = ?`,
+      [company_name.trim()]
+    );
+
+    let companyId: number;
+    if (companyRows.length > 0) {
+      companyId = companyRows[0].company_id;
+    } else {
+      const [insertCompany]: any = await mysqlPool.query(
+        `INSERT INTO Companies (name) VALUES (?)`,
+        [company_name.trim()]
+      );
+      companyId = insertCompany.insertId;
+    }
+
+    let targetOppId = opportunity_id;
+
+    // B. Insert or Update Opportunity in MySQL
+    if (targetOppId) {
+      await mysqlPool.query(
+        `UPDATE Opportunities 
+         SET company_id = ?, title = ?, opportunity_type = ?, description = ?, required_skills = ?
+         WHERE opportunity_id = ?`,
+        [companyId, title, opportunity_type || 'Internship', description, required_skills, targetOppId]
+      );
+    } else {
+      const [insertOpp]: any = await mysqlPool.query(
+        `INSERT INTO Opportunities (company_id, title, opportunity_type, description, required_skills)
+         VALUES (?, ?, ?, ?, ?)`,
+        [companyId, title, opportunity_type || 'Internship', description, required_skills]
+      );
+      targetOppId = insertOpp.insertId;
+    }
+
+    // C. Synchronize with PostgreSQL (pgvector store)
+    await pgPool.query(
+      `INSERT INTO opportunity_vectors (opportunity_id, title, description)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (opportunity_id) 
+       DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description`,
+      [targetOppId, title, `${description} Requirements: ${required_skills}`]
+    );
+
+    return NextResponse.json({
+      success: true,
+      message: 'Opportunity successfully updated and synchronized across databases!',
+      opportunity_id: targetOppId,
+    });
+  } catch (error: any) {
+    console.error('Error managing opportunity:', error);
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+========== app/api/resumes/route.ts ==========
+import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { jwtVerify } from "jose";
+import { mysqlPool } from "@/lib/mysql";
+
+export const runtime = "nodejs";
+
+const aliases: Record<string, string> = {
+  "nlp": "Natural Language Processing",
+  "express": "Express.js",
+};
+
+export async function POST(request: NextRequest) {
+  let connection: any;
+
+  try {
+    // 1. Authenticate the student using the HTTP-only session cookie.
+    const cookieStore = await cookies();
+    const token = cookieStore.get("internhub_session")?.value;
+    const secret = process.env.AUTH_SECRET;
+
+    if (!token || !secret) {
+      return NextResponse.json(
+        { success: false, message: "Authentication required." },
+        { status: 401 }
+      );
+    }
+
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(secret)
+    );
+
+    const userId = Number(payload.userId);
+
+    if (!Number.isInteger(userId) || userId <= 0 || payload.role !== "STUDENT") {
+      return NextResponse.json(
+        { success: false, message: "Student access required." },
+        { status: 403 }
+      );
+    }
+
+    // 2. Validate the request.
+    const body = await request.json();
+    const fileName = String(body.fileName || "").trim();
+    const extractedText = String(body.extractedText || "");
+    const rawSkills = body.extractedSkills;
+
+    if (!fileName || !Array.isArray(rawSkills) || !extractedText.trim()) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "fileName, extractedText and extractedSkills are required.",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (fileName.length > 255 || extractedText.length > 2_000_000) {
+      return NextResponse.json(
+        { success: false, message: "Resume data exceeds the allowed size." },
+        { status: 413 }
+      );
+    }
+
+    const normalizedSkills = [
+      ...new Set(
+        rawSkills
+          .filter((item: unknown): item is string => typeof item === "string")
+          .map((item: string) => item.trim())
+          .filter(Boolean)
+          .map((item: string) => aliases[item.toLowerCase()] || item)
+      ),
+    ];
+
+    connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
+
+    // 3. Ensure the authenticated user has a student profile.
+    const [studentRows]: any = await connection.execute(
+      "SELECT student_id FROM students WHERE student_id = ? FOR UPDATE",
+      [userId]
+    );
+
+    if (studentRows.length === 0) {
+      await connection.rollback();
+
+      return NextResponse.json(
+        { success: false, message: "Student profile not found." },
+        { status: 404 }
+      );
+    }
+
+    // 4. Match extracted skills against the canonical skill taxonomy.
+    let matchedSkills: any[] = [];
+
+    if (normalizedSkills.length > 0) {
+      const placeholders = normalizedSkills.map(() => "?").join(",");
+
+      const [skillRows]: any = await connection.execute(
+        `SELECT skill_id, skill_name
+         FROM skills
+         WHERE LOWER(skill_name) IN (${placeholders})`,
+        normalizedSkills.map((skill) => skill.toLowerCase())
+      );
+
+      matchedSkills = skillRows;
+    }
+
+    // 5. Keep only the newest resume active.
+    await connection.execute(
+      "UPDATE resumes SET is_active = 0 WHERE student_id = ?",
+      [userId]
+    );
+
+    // 6. Save the new resume and extracted text.
+    const [resumeResult]: any = await connection.execute(
+      `INSERT INTO resumes
+        (student_id, file_name, extracted_text, is_active)
+       VALUES (?, ?, ?, 1)`,
+      [userId, fileName, extractedText]
+    );
+
+    // 7. Replace only resume-derived skills.
+    await connection.execute(
+      "DELETE FROM student_skills WHERE student_id = ? AND source = 'RESUME'",
+      [userId]
+    );
+
+    for (const skill of matchedSkills) {
+      await connection.execute(
+        `INSERT INTO student_skills
+          (student_id, skill_id, source, confidence_score)
+         VALUES (?, ?, 'RESUME', NULL)
+         ON DUPLICATE KEY UPDATE
+           source = 'RESUME',
+           updated_at = CURRENT_TIMESTAMP`,
+        [userId, skill.skill_id]
+      );
+    }
+
+    await connection.commit();
+
+    return NextResponse.json({
+      success: true,
+      message: "Resume and extracted skills saved successfully.",
+      resumeId: resumeResult.insertId,
+      studentId: userId,
+      recognizedSkills: matchedSkills.map((skill) => skill.skill_name),
+      unmatchedSkills: normalizedSkills.filter(
+        (name) =>
+          !matchedSkills.some(
+            (skill) => skill.skill_name.toLowerCase() === name.toLowerCase()
+          )
+      ),
+    });
+  } catch (error) {
+    if (connection) {
+      await connection.rollback().catch(() => {});
+    }
+
+    console.error("Resume save error:", error);
+
+    return NextResponse.json(
+      { success: false, message: "Unable to save resume data." },
+      { status: 500 }
+    );
+  } finally {
+    connection?.release();
+  }
+}
+
+========== app/api/applications/route.ts ==========
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { jwtVerify } from "jose";
+import { mysqlPool } from "@/lib/mysql";
+
+async function getAuthenticatedStudent() {
+  const token = (await cookies()).get("internhub_session")?.value;
+
+  if (!token) {
+    return { user: null, status: 401, error: "Not authenticated." };
+  }
+
+  const secret = process.env.AUTH_SECRET;
+
+  if (!secret) {
+    return { user: null, status: 500, error: "Authentication is not configured." };
+  }
+
+  try {
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(secret)
+    );
+
+    const userId = Number(payload.userId);
+
+    if (!userId || payload.role !== "STUDENT") {
+      return { user: null, status: 403, error: "Student access required." };
+    }
+
+    const [rows]: any = await mysqlPool.execute(
+      `SELECT user_id, first_name, last_name, email, role
+       FROM users
+       WHERE user_id = ? AND role = 'STUDENT'
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (!rows.length) {
+      return { user: null, status: 404, error: "Student account not found." };
+    }
+
+    return { user: rows[0], status: 200, error: null };
+  } catch {
+    return { user: null, status: 401, error: "Invalid or expired session." };
+  }
+}
+
+function calculateMedian(values: number[]): number {
+  if (!values.length) return 0;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+// GET: Authenticated student's applications + stipend analytics
+export async function GET() {
+  try {
+    const auth = await getAuthenticatedStudent();
+
+    if (!auth.user) {
+      return NextResponse.json(
+        { success: false, error: auth.error },
+        { status: auth.status }
+      );
+    }
+
+    const [apps]: any = await mysqlPool.execute(
+      `SELECT
+          a.application_id,
+          a.student_id,
+          a.opportunity_id,
+          a.applied_date,
+          a.current_stage,
+          a.match_score,
+          a.candidate_name,
+          a.candidate_email,
+          a.status,
+          a.extracted_skills,
+          o.title,
+          o.opportunity_type,
+          c.name AS company_name
+       FROM Applications a
+       JOIN Opportunities o ON a.opportunity_id = o.opportunity_id
+       JOIN Companies c ON o.company_id = c.company_id
+       WHERE a.candidate_email = ?
+       ORDER BY a.application_id DESC`,
+      [auth.user.email]
+    );
+
+    for (const app of apps) {
+      const [history]: any = await mysqlPool.execute(
+        `SELECT status, notes, changed_at
+         FROM Application_Status_History
+         WHERE application_id = ?
+         ORDER BY history_id ASC`,
+        [app.application_id]
+      );
+
+      app.history = history?.length
+        ? history
+        : [{
+            status: app.status || app.current_stage || "Applied",
+            notes: "Application record created.",
+            changed_at: app.applied_date,
+          }];
+    }
+
+    const [oppRows]: any = await mysqlPool.execute(
+      `SELECT title, opportunity_type,
+              COALESCE(stipend, 0.00) AS stipend
+       FROM Opportunities`
+    );
+
+    const grouped: Record<
+      string,
+      { total: number; count: number; values: number[] }
+    > = {};
+
+    for (const row of oppRows) {
+      const key = `${row.title} (${row.opportunity_type})`;
+      const value = Number(row.stipend) || 0;
+
+      if (!grouped[key]) {
+        grouped[key] = { total: 0, count: 0, values: [] };
+      }
+
+      grouped[key].total += value;
+      grouped[key].count += 1;
+      grouped[key].values.push(value);
+    }
+
+    const stipendAnalytics = Object.entries(grouped).map(([role, item]) => ({
+      role,
+      count: item.count,
+      average_stipend: Number((item.total / item.count).toFixed(2)),
+      median_stipend: Number(calculateMedian(item.values).toFixed(2)),
+    }));
+
+    return NextResponse.json({
+      success: true,
+      applications: apps || [],
+      stipend_analytics: stipendAnalytics,
+    });
+  } catch (error: any) {
+    console.error("Applications API GET Error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: error.message || "Error fetching applications.",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+// POST: Apply using the authenticated student's identity
+export async function POST(request: Request) {
+  try {
+    const auth = await getAuthenticatedStudent();
+
+    if (!auth.user) {
+      return NextResponse.json(
+        { success: false, error: auth.error },
+        { status: auth.status }
+      );
+    }
+
+    const body = await request.json();
+    const opportunityId = Number(body.opportunity_id);
+
+    if (!Number.isInteger(opportunityId) || opportunityId <= 0) {
+      return NextResponse.json(
+        { success: false, error: "A valid opportunity ID is required." },
+        { status: 400 }
+      );
+    }
+
+    const [opportunities]: any = await mysqlPool.execute(
+      `SELECT opportunity_id
+       FROM Opportunities
+       WHERE opportunity_id = ? AND status = 'Open'
+       LIMIT 1`,
+      [opportunityId]
+    );
+
+    if (!opportunities.length) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "This opportunity is unavailable or closed.",
+        },
+        { status: 404 }
+      );
+    }
+
+    const studentId = Number(auth.user.user_id);
+    const candidateName =
+      `${auth.user.first_name} ${auth.user.last_name}`.trim();
+    const candidateEmail = auth.user.email;
+
+    const skillsText = Array.isArray(body.extracted_skills)
+      ? body.extracted_skills.join(", ")
+      : "";
+
+    const [result]: any = await mysqlPool.execute(
+      `INSERT INTO Applications (
+          student_id,
+          opportunity_id,
+          applied_date,
+          current_stage,
+          match_score,
+          notes,
+          candidate_name,
+          candidate_email,
+          status,
+          extracted_skills
+       )
+       VALUES (?, ?, CURDATE(), 'Applied', NULL, ?, ?, ?, 'Applied', ?)
+       ON DUPLICATE KEY UPDATE
+          applied_date = CURDATE(),
+          current_stage = 'Applied',
+          notes = VALUES(notes),
+          candidate_name = VALUES(candidate_name),
+          candidate_email = VALUES(candidate_email),
+          status = 'Applied',
+          extracted_skills = VALUES(extracted_skills)`,
+      [
+        studentId,
+        opportunityId,
+        typeof body.notes === "string"
+          ? body.notes
+          : "Application submitted via InternHub.",
+        candidateName,
+        candidateEmail,
+        skillsText,
+      ]
+    );
+
+    let applicationId = Number(result.insertId) || 0;
+
+    if (!applicationId) {
+      const [existing]: any = await mysqlPool.execute(
+        `SELECT application_id
+         FROM Applications
+         WHERE student_id = ? AND opportunity_id = ?
+         LIMIT 1`,
+        [studentId, opportunityId]
+      );
+
+      applicationId = Number(existing[0]?.application_id) || 0;
+    }
+
+    if (applicationId) {
+      await mysqlPool.execute(
+        `INSERT INTO Application_Status_History (
+            application_id, status, notes
+         )
+         VALUES (?, 'Applied',
+           'Application submitted or updated by the authenticated student.')`,
+        [applicationId]
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: "Application submitted successfully.",
+      application_id: applicationId,
+    });
+  } catch (error: any) {
+    console.error("Applications API POST Error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: error.message || "Failed to submit application.",
+      },
+      { status: 500 }
+    );
+  }
+}

@@ -1,0 +1,1416 @@
+﻿'use client';
+
+import React, { useState, useEffect } from 'react';
+
+export default function RecommendationsPage() {
+  const [file, setFile] = useState<File | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [extractedSkills, setExtractedSkills] = useState<string[]>([]);
+  const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [myApplications, setMyApplications] = useState<any[]>([]);
+  const [stipendStats, setStipendStats] = useState<any[]>([]);
+  
+  // Dynamic Candidate Inputs
+  const [candidateName, setCandidateName] = useState('Dheeraj S');
+  const [candidateEmail, setCandidateEmail] = useState('dheeraj@pesu.edu');
+  
+  const [error, setError] = useState('');
+  const [applyMsg, setApplyMsg] = useState('');
+
+  // Fetch applications specifically for the currently entered email
+  const fetchApplicationsForCandidate = async (emailToFetch: string) => {
+    if (!emailToFetch.trim()) {
+      setMyApplications([]);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/applications?email=${encodeURIComponent(emailToFetch.trim())}`);
+      const data = await res.json();
+      if (data.success) {
+        setMyApplications(data.applications || []);
+        setStipendStats(data.stipend_analytics || []);
+      }
+    } catch (err) {
+      console.error('Error fetching candidate applications:', err);
+    }
+  };
+
+  // Re-fetch whenever candidateEmail changes
+  useEffect(() => {
+    fetchApplicationsForCandidate(candidateEmail);
+  }, [candidateEmail]);
+
+  const handleScanAndRecommend = async () => {
+    if (!file) {
+      setError('Please select a CV file first.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      let cvText = '';
+      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        const pdfjsLib = await import('pdfjs-dist/build/pdf');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js';
+
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          const strings = content.items
+            .map((item: any) => (typeof item.str === 'string' ? item.str : ''))
+            .filter((str: string) => str.length > 0);
+          cvText += strings.join(' ') + ' ';
+        }
+      } else {
+        cvText = await file.text();
+      }
+
+      const response = await fetch('/api/extract-cv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cvText, fileName: file.name }),
+      });
+
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || 'Failed to scan CV');
+
+      // Persist the uploaded resume and recognized skills for the logged-in student
+      const saveResponse = await fetch('/api/resumes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: file.name,
+          extractedText: cvText,
+          extractedSkills: data.extracted_skills || [],
+        }),
+      });
+
+      const saveData = await saveResponse.json();
+
+      if (!saveResponse.ok || !saveData.success) {
+        throw new Error(saveData.error || 'Failed to save your resume.');
+      }
+
+      console.log('Resume saved:', saveData);
+
+      setExtractedSkills(data.extracted_skills || []);
+      setRecommendations(data.recommendations || []);
+      
+      // Refresh applications for this exact candidate
+      fetchApplicationsForCandidate(candidateEmail);
+    } catch (err: any) {
+      setError(err.message || 'An error occurred during CV scanning.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApply = async (opp: any) => {
+    setApplyMsg('');
+    try {
+      const res = await fetch('/api/applications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          opportunity_id: opp.opportunity_id,
+          candidate_name: candidateName,
+          candidate_email: candidateEmail,
+          extracted_skills: extractedSkills,
+          match_score: opp.match_score,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        setApplyMsg(`Applied to ${opp.title} successfully!`);
+        // Dynamically reload application history for this candidate
+        fetchApplicationsForCandidate(candidateEmail);
+      } else {
+        setApplyMsg(`Application failed: ${data.error}`);
+      }
+    } catch (err: any) {
+      setApplyMsg(`Error applying: ${err.message}`);
+    }
+  };
+
+  return (
+    <main className="ih-page">
+      <header className="ih-header">
+        <a href="/" className="ih-brand">
+          <span className="ih-brand-icon">✥</span>
+          InternHub
+        </a>
+
+        <nav className="ih-nav">
+          <a href="/">Home</a>
+          <a className="ih-active" href="/recommendations">Jobs</a>
+          <a href="/companies">Companies</a>
+          <a href="/stipend-insights">Stipend Insights</a>
+          <a href="/about">About</a>
+        </nav>
+
+        <div className="ih-profile">
+          <span className="ih-avatar">
+            {(candidateName || "S").charAt(0).toUpperCase()}
+          </span>
+          <span>Student</span>
+        </div>
+      </header>
+
+      <div className="ih-container">
+        <section className="ih-hero">
+          <div>
+            <div className="ih-eyebrow">
+              <span className="ih-dot" />
+              YOUR CAREER STARTS HERE
+            </div>
+            <h1>Upload Your Resume</h1>
+            <p>
+              Get personalized internship recommendations based on your skills.
+            </p>
+          </div>
+
+          <div className="ih-hero-art">
+            <div className="ih-art-glow" />
+            <div className="ih-resume-art">
+              <strong>RESUME</strong>
+              <div className="ih-art-avatar">♙</div>
+              <i />
+              <i />
+              <i />
+              <i />
+            </div>
+            <div className="ih-cloud">↑</div>
+          </div>
+        </section>
+
+        <section className="ih-steps">
+          <div className="ih-step ih-step-active">
+            <span>1</span>
+            <small>Upload Resume</small>
+          </div>
+          <div className="ih-step-line" />
+          <div className={`ih-step ${extractedSkills.length ? "ih-step-active" : ""}`}>
+            <span>2</span>
+            <small>Extract Skills</small>
+          </div>
+          <div className="ih-step-line" />
+          <div className={`ih-step ${recommendations.length ? "ih-step-active" : ""}`}>
+            <span>3</span>
+            <small>View Recommendations</small>
+          </div>
+        </section>
+
+        <section className="ih-main-grid">
+          <div className="ih-upload-panel">
+            <div
+              className="ih-dropzone"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                const droppedFile = event.dataTransfer.files?.[0];
+                if (
+                  droppedFile &&
+                  (droppedFile.name.toLowerCase().endsWith(".pdf") ||
+                   droppedFile.name.toLowerCase().endsWith(".txt"))
+                ) {
+                  setFile(droppedFile);
+                  setError("");
+                } else if (droppedFile) {
+                  setError("Please select a PDF or TXT file.");
+                }
+              }}
+            >
+              <div className="ih-upload-symbol">
+                <svg viewBox="0 0 48 48" fill="none">
+                  <path
+                    d="M24 31V6m0 0L14 16M24 6l10 10M8 29v12h32V29"
+                    stroke="currentColor"
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
+
+              <h2>Drag and drop your resume here</h2>
+              <p>or click to browse files</p>
+              <small>Supported formats: PDF, TXT · Maximum size: 5 MB</small>
+
+              <label className="ih-browse-button">
+                Choose File
+                <input
+                  type="file"
+                  accept=".pdf,.txt,application/pdf,text/plain"
+                  onChange={(event) => {
+                    const selected = event.target.files?.[0] || null;
+                    if (selected && selected.size > 5 * 1024 * 1024) {
+                      setError("File size must be 5 MB or less.");
+                      setFile(null);
+                      return;
+                    }
+                    setFile(selected);
+                    setError("");
+                  }}
+                />
+              </label>
+            </div>
+
+            {file && (
+              <div className="ih-file-card">
+                <div className="ih-pdf-icon">
+                  {file.name.toLowerCase().endsWith(".pdf") ? "PDF" : "TXT"}
+                </div>
+                <div className="ih-file-details">
+                  <strong>{file.name}</strong>
+                  <small>{(file.size / 1024).toFixed(1)} KB</small>
+                </div>
+                <span className="ih-file-ready">
+                  {loading ? "Processing..." : "Ready"}
+                </span>
+                <button
+                  className="ih-remove"
+                  onClick={() => setFile(null)}
+                  disabled={loading}
+                  title="Remove file"
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
+            {error && <div className="ih-alert ih-error">⚠ {error}</div>}
+
+            {applyMsg && (
+              <div className="ih-alert ih-success">{applyMsg}</div>
+            )}
+
+            <button
+              className="ih-scan-button"
+              onClick={handleScanAndRecommend}
+              disabled={loading || !file}
+            >
+              {loading ? (
+                <>
+                  <span className="ih-spinner" />
+                  Scanning Resume...
+                </>
+              ) : (
+                <>✦ Extract Skills from Resume <span>→</span></>
+              )}
+            </button>
+
+            <p className="ih-privacy">
+              <span>▣</span> Your resume is securely processed for personalized matching.
+            </p>
+          </div>
+
+          <aside className="ih-sidebar">
+            <div className="ih-info-card">
+              <h3>How it Works?</h3>
+
+              <div className="ih-info-step">
+                <span className="ih-info-icon">▤</span>
+                <div>
+                  <strong>Upload Resume</strong>
+                  <p>Upload your latest resume in PDF or TXT format.</p>
+                </div>
+              </div>
+
+              <div className="ih-connector">↓</div>
+
+              <div className="ih-info-step">
+                <span className="ih-info-icon">⚙</span>
+                <div>
+                  <strong>Extract Skills</strong>
+                  <p>Our scanner identifies your technical skills and expertise.</p>
+                </div>
+              </div>
+
+              <div className="ih-connector">↓</div>
+
+              <div className="ih-info-step">
+                <span className="ih-info-icon">◎</span>
+                <div>
+                  <strong>Get Recommendations</strong>
+                  <p>Discover internships that align with your skill set.</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="ih-info-card ih-features">
+              <h3>Supported Features</h3>
+              <p><span>✓</span> Automatic skill extraction</p>
+              <p><span>✓</span> Domain and role classification</p>
+              <p><span>✓</span> Personalized internship matching</p>
+              <p><span>✓</span> Match score and skill insights</p>
+            </div>
+          </aside>
+        </section>
+
+        <section className="ih-skills-card">
+          <div className="ih-section-heading">
+            <div>
+              <h2>Extracted Skills Preview</h2>
+              <p>
+                {extractedSkills.length
+                  ? "Skills identified from your uploaded resume"
+                  : "Your skills will appear here after resume analysis"}
+              </p>
+            </div>
+            <div className="ih-skill-total">
+              <strong>{extractedSkills.length}</strong>
+              <small>Skills Found</small>
+            </div>
+          </div>
+
+          {extractedSkills.length > 0 ? (
+            <div className="ih-skills-body">
+              <div className="ih-skill-circle">
+                <div>
+                  <strong>{extractedSkills.length}</strong>
+                  <small>Skills Found</small>
+                </div>
+              </div>
+
+              <div className="ih-skill-list">
+                {[
+                  {
+                    name: "Programming & Development",
+                    icon: "</>",
+                    matches: ["Python", "Java", "C", "C++", "JavaScript", "TypeScript", "React", "Next.js", "Node.js", "Express.js", "FastAPI"]
+                  },
+                  {
+                    name: "Databases",
+                    icon: "▤",
+                    matches: ["SQL", "MySQL", "PostgreSQL", "MongoDB", "Neo4j", "Redis", "ChromaDB"]
+                  },
+                  {
+                    name: "AI & Machine Learning",
+                    icon: "✺",
+                    matches: ["Machine Learning", "Deep Learning", "Computer Vision", "Natural Language Processing", "PyTorch", "TensorFlow", "OpenCV"]
+                  },
+                  {
+                    name: "Tools & Technologies",
+                    icon: "⚙",
+                    matches: ["Git", "Docker", "Kubernetes", "Linux", "Wazuh"]
+                  }
+                ].map((group) => {
+                  const matched = extractedSkills.filter((skill: string) =>
+                    group.matches.some((item) =>
+                      item.toLowerCase() === skill.toLowerCase()
+                    )
+                  );
+
+                  return matched.length ? (
+                    <div className="ih-skill-group" key={group.name}>
+                      <div className="ih-group-name">
+                        <span>{group.icon}</span>
+                        {group.name}
+                      </div>
+                      <div className="ih-tags">
+                        {matched.map((skill: string) => (
+                          <span key={skill}>{skill}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null;
+                })}
+
+                {extractedSkills
+                  .filter((skill: string) =>
+                    ![
+                      "Python", "Java", "C", "C++", "JavaScript", "TypeScript",
+                      "React", "Next.js", "Node.js", "Express.js", "FastAPI",
+                      "SQL", "MySQL", "PostgreSQL", "MongoDB", "Neo4j", "Redis",
+                      "ChromaDB", "Machine Learning", "Deep Learning",
+                      "Computer Vision", "Natural Language Processing",
+                      "PyTorch", "TensorFlow", "OpenCV", "Git", "Docker",
+                      "Kubernetes", "Linux", "Wazuh"
+                    ].some((item) => item.toLowerCase() === skill.toLowerCase())
+                  )
+                  .map((skill: string) => (
+                    <span className="ih-extra-skill" key={skill}>{skill}</span>
+                  ))}
+              </div>
+            </div>
+          ) : (
+            <div className="ih-empty-skills">
+              <span>✧</span>
+              <p>Upload and scan your resume to see your extracted skills.</p>
+            </div>
+          )}
+        </section>
+
+        {recommendations.length > 0 && (
+          <section className="ih-results-section">
+            <div className="ih-results-heading">
+              <div>
+                <div className="ih-eyebrow">MATCHED FOR YOU</div>
+                <h2>Recommended Opportunities</h2>
+                <p>Internships selected based on your extracted skills.</p>
+              </div>
+              <span className="ih-result-count">{recommendations.length} Matches</span>
+            </div>
+
+            <div className="ih-recommendations">
+              {recommendations.map((rec) => {
+                const isAlreadyApplied = myApplications.some(
+                  (app) => app.opportunity_id === rec.opportunity_id
+                );
+
+                return (
+                  <div key={rec.opportunity_id} className="ih-job-card">
+                    <div className="ih-job-details">
+                      <h3>{rec.title}</h3>
+                      <p className="ih-company">
+                        {rec.company_name} · {rec.opportunity_type}
+                      </p>
+                      <p>{rec.description}</p>
+                    </div>
+                    <div className="ih-job-actions">
+                      <span className="ih-match">
+                        {(rec.match_score * 100).toFixed(1)}% Match
+                      </span>
+                      {isAlreadyApplied ? (
+                        <span className="ih-applied">✓ Applied</span>
+                      ) : (
+                        <button onClick={() => handleApply(rec)}>
+                          Apply Now →
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {stipendStats.length > 0 && (
+          <section className="ih-data-section">
+            <h2>Role Stipend Analytics & Averages</h2>
+            <div className="ih-stipend-grid">
+              {stipendStats.map((stat, idx) => (
+                <div className="ih-stipend-card" key={idx}>
+                  <strong>{stat.role}</strong>
+                  <p>Average: <span>₹{stat.average_stipend.toLocaleString()}</span></p>
+                  <p>Median: ₹{stat.median_stipend.toLocaleString()}</p>
+                  <small>Records analyzed: {stat.count}</small>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {myApplications.length > 0 && (
+          <section className="ih-data-section">
+            <h2>My Applications ({myApplications.length})</h2>
+            <p className="ih-muted">Application status and progress timeline</p>
+
+            <div className="ih-application-list">
+              {myApplications.map((app) => (
+                <div className="ih-application-card" key={app.application_id}>
+                  <div className="ih-application-heading">
+                    <div>
+                      <h3>{app.title}</h3>
+                      <p>{app.company_name} · {app.opportunity_type}</p>
+                    </div>
+                    <span>{app.status}</span>
+                  </div>
+
+                  {app.history && app.history.length > 0 && (
+                    <div className="ih-history">
+                      <strong>Status Timeline</strong>
+                      {app.history.map((h: any, idx: number) => (
+                        <p key={idx}>
+                          <span>●</span> {h.status} — {h.notes} (
+                          {new Date(h.changed_at).toLocaleDateString()})
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <footer className="ih-footer">
+          <strong>✥ InternHub</strong>
+          <span>Find opportunities that match your skills.</span>
+        </footer>
+      </div>
+
+      <style jsx>{`
+        .ih-page {
+          min-height: 100vh;
+          color: #f8fafc;
+          background:
+            radial-gradient(ellipse at 80% 5%, #581c9522, transparent 35%),
+            radial-gradient(ellipse at 5% 55%, #1e40af12, transparent 35%),
+            #050817;
+          font-family: Arial, Helvetica, sans-serif;
+        }
+
+        .ih-header {
+          min-height: 70px;
+          padding: 0 5%;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 24px;
+          border-bottom: 1px solid #31234c;
+          background: #070b1bf2;
+          position: sticky;
+          top: 0;
+          z-index: 10;
+          backdrop-filter: blur(14px);
+        }
+
+        .ih-brand {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          color: white;
+          font-size: 23px;
+          font-weight: 800;
+          text-decoration: none;
+          white-space: nowrap;
+        }
+
+        .ih-brand-icon {
+          color: #c026ff;
+          font-size: 32px;
+          text-shadow: 0 0 18px #a855f7;
+        }
+
+        .ih-nav {
+          display: flex;
+          align-items: center;
+          gap: clamp(15px, 2.5vw, 34px);
+          height: 70px;
+        }
+
+        .ih-nav a {
+          color: #b9c3d7;
+          text-decoration: none;
+          font-size: 13px;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          border-bottom: 2px solid transparent;
+        }
+
+        .ih-nav a:hover, .ih-nav .ih-active {
+          color: #e9d5ff;
+          border-color: #c026ff;
+        }
+
+        .ih-profile {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          font-size: 13px;
+          white-space: nowrap;
+        }
+
+        .ih-avatar {
+          height: 34px;
+          width: 34px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          background: linear-gradient(135deg, #9333ea, #0891b2);
+          border: 2px solid #c084fc;
+          font-weight: bold;
+        }
+
+        .ih-container {
+          max-width: 1440px;
+          width: 91%;
+          margin: 0 auto;
+          padding: 38px 0 25px;
+        }
+
+        .ih-hero {
+          min-height: 145px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          position: relative;
+        }
+
+        .ih-eyebrow {
+          color: #c084fc;
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: 2px;
+          margin-bottom: 11px;
+        }
+
+        .ih-dot {
+          display: inline-block;
+          width: 7px;
+          height: 7px;
+          margin-right: 8px;
+          border-radius: 50%;
+          background: #d946ef;
+          box-shadow: 0 0 12px #d946ef;
+        }
+
+        .ih-hero h1 {
+          margin: 0 0 9px;
+          font-size: clamp(30px, 3vw, 43px);
+          letter-spacing: -1.3px;
+        }
+
+        .ih-hero p {
+          margin: 0;
+          color: #b9c3d7;
+          font-size: 14px;
+        }
+
+        .ih-hero-art {
+          width: 245px;
+          height: 140px;
+          position: relative;
+          margin-right: 45px;
+        }
+
+        .ih-art-glow {
+          position: absolute;
+          inset: 20px;
+          background: #7c3aed;
+          filter: blur(40px);
+          opacity: .5;
+        }
+
+        .ih-resume-art {
+          position: absolute;
+          right: 55px;
+          top: 5px;
+          width: 120px;
+          height: 125px;
+          padding: 14px;
+          border: 1px solid #8b5cf6;
+          border-radius: 12px;
+          background: linear-gradient(145deg, #35216d, #111a45);
+          transform: rotate(9deg);
+          box-shadow: 0 0 25px #7c3aed77;
+        }
+
+        .ih-resume-art strong {
+          font-size: 15px;
+        }
+
+        .ih-art-avatar {
+          width: 23px;
+          height: 23px;
+          margin: 9px 0;
+          display: grid;
+          place-items: center;
+          background: #2563eb;
+          border-radius: 5px;
+        }
+
+        .ih-resume-art i {
+          display: block;
+          width: 85%;
+          height: 4px;
+          margin: 7px 0;
+          border-radius: 5px;
+          background: linear-gradient(90deg, #a78bfa, #38bdf8);
+        }
+
+        .ih-resume-art i:nth-last-child(2) { width: 65%; }
+        .ih-resume-art i:last-child { width: 45%; }
+
+        .ih-cloud {
+          position: absolute;
+          right: 0;
+          bottom: 3px;
+          width: 75px;
+          height: 48px;
+          border-radius: 18px;
+          display: grid;
+          place-items: center;
+          color: white;
+          font-size: 34px;
+          background: linear-gradient(135deg, #c026ff, #6d28d9);
+          box-shadow: 0 0 25px #a855f799;
+        }
+
+        .ih-steps {
+          max-width: 660px;
+          margin: 0 auto 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .ih-step {
+          min-width: 120px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 8px;
+          color: #8491aa;
+          white-space: nowrap;
+        }
+
+        .ih-step span {
+          width: 35px;
+          height: 35px;
+          display: grid;
+          place-items: center;
+          border: 2px solid #475569;
+          border-radius: 50%;
+          background: #111a30;
+          font-weight: 800;
+        }
+
+        .ih-step small {
+          font-size: 11px;
+        }
+
+        .ih-step-active {
+          color: #f5eaff;
+        }
+
+        .ih-step-active span {
+          border-color: #d8b4fe;
+          background: linear-gradient(135deg, #a855f7, #6d28d9);
+          box-shadow: 0 0 17px #a855f777;
+        }
+
+        .ih-step-line {
+          flex: 1;
+          min-width: 30px;
+          height: 2px;
+          margin: 0 -3px 23px;
+          background: #334155;
+        }
+
+        .ih-main-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.65fr) minmax(280px, .95fr);
+          gap: 18px;
+        }
+
+        .ih-upload-panel {
+          min-width: 0;
+          padding: 17px;
+          border: 1px solid #293653;
+          border-radius: 16px;
+          background: linear-gradient(145deg, #0c1429, #0a1020);
+          display: flex;
+          flex-direction: column;
+          gap: 13px;
+        }
+
+        .ih-dropzone {
+          min-height: 270px;
+          padding: 22px;
+          border: 2px dashed #8b5cf6;
+          border-radius: 14px;
+          background: radial-gradient(ellipse at center, #4c1d951c, transparent 70%), #090f20;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+          transition: .2s;
+        }
+
+        .ih-dropzone:hover {
+          border-color: #d946ef;
+          background-color: #17112e;
+        }
+
+        .ih-upload-symbol {
+          width: 61px;
+          height: 61px;
+          display: grid;
+          place-items: center;
+          margin-bottom: 13px;
+          border: 1px solid #5142a0;
+          border-radius: 13px;
+          color: #e9d5ff;
+          background: linear-gradient(145deg, #28245d, #121b3b);
+          box-shadow: 0 0 20px #7c3aed33;
+        }
+
+        .ih-upload-symbol svg {
+          width: 35px;
+          height: 35px;
+        }
+
+        .ih-dropzone h2 {
+          margin: 0 0 7px;
+          font-size: 16px;
+        }
+
+        .ih-dropzone p {
+          margin: 0 0 9px;
+          color: #cbd5e1;
+          font-size: 13px;
+        }
+
+        .ih-dropzone small {
+          color: #94a3b8;
+          font-size: 11px;
+          margin-bottom: 16px;
+        }
+
+        .ih-browse-button {
+          display: inline-flex;
+          padding: 12px 25px;
+          border: 1px solid #c084fc;
+          border-radius: 9px;
+          background: linear-gradient(110deg, #9333ea, #6d28d9);
+          box-shadow: 0 5px 20px #7c3aed44;
+          color: white;
+          font-weight: 800;
+          font-size: 13px;
+          cursor: pointer;
+        }
+
+        .ih-browse-button input {
+          display: none;
+        }
+
+        .ih-file-card {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          min-height: 62px;
+          padding: 10px 13px;
+          border: 1px solid #34466b;
+          border-radius: 11px;
+          background: #111c32;
+        }
+
+        .ih-pdf-icon {
+          width: 38px;
+          height: 42px;
+          display: grid;
+          place-items: center;
+          border-radius: 6px;
+          background: white;
+          color: #dc2626;
+          font-weight: 900;
+          font-size: 10px;
+        }
+
+        .ih-file-details {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .ih-file-details strong {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 12px;
+        }
+
+        .ih-file-details small {
+          color: #94a3b8;
+          font-size: 10px;
+        }
+
+        .ih-file-ready {
+          color: #86efac;
+          font-size: 11px;
+        }
+
+        .ih-remove {
+          border: 0;
+          background: transparent;
+          color: #cbd5e1;
+          font-size: 23px;
+          cursor: pointer;
+        }
+
+        .ih-remove:hover { color: #f87171; }
+
+        .ih-scan-button {
+          min-height: 48px;
+          width: min(100%, 390px);
+          align-self: center;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          padding: 12px 20px;
+          border: 1px solid #c084fc;
+          border-radius: 10px;
+          background: linear-gradient(110deg, #9333ea, #6d28d9 55%, #7c3aed);
+          color: white;
+          font-weight: 800;
+          font-size: 13px;
+          cursor: pointer;
+          box-shadow: 0 5px 22px #7c3aed44;
+          transition: .2s;
+        }
+
+        .ih-scan-button:hover:not(:disabled) {
+          transform: translateY(-2px);
+          box-shadow: 0 7px 25px #a855f777;
+        }
+
+        .ih-scan-button:disabled {
+          opacity: .55;
+          cursor: not-allowed;
+        }
+
+        .ih-privacy {
+          margin: 0;
+          text-align: center;
+          color: #8390a8;
+          font-size: 10px;
+        }
+
+        .ih-privacy span { color: #a78bfa; margin-right: 5px; }
+
+        .ih-alert {
+          padding: 10px 12px;
+          border-radius: 8px;
+          font-size: 12px;
+        }
+
+        .ih-error {
+          color: #fca5a5;
+          background: #7f1d1d33;
+        }
+
+        .ih-success {
+          color: #86efac;
+          background: #14532d33;
+        }
+
+        .ih-sidebar {
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+
+        .ih-info-card {
+          padding: 17px;
+          border: 1px solid #7134b7;
+          border-radius: 15px;
+          background: radial-gradient(ellipse at top left, #6d28d922, transparent 60%), #0d1428;
+        }
+
+        .ih-info-card h3 {
+          margin: 0 0 16px;
+          padding-bottom: 11px;
+          border-bottom: 1px solid #29334c;
+          font-size: 16px;
+        }
+
+        .ih-info-step {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+
+        .ih-info-icon {
+          flex: 0 0 39px;
+          height: 39px;
+          width: 39px;
+          display: grid;
+          place-items: center;
+          border: 1px solid #c084fc;
+          border-radius: 50%;
+          background: linear-gradient(135deg, #9333ea, #4c1d95);
+          box-shadow: 0 0 14px #9333ea55;
+          font-size: 18px;
+        }
+
+        .ih-info-step strong { font-size: 12px; }
+
+        .ih-info-step p {
+          margin: 4px 0 0;
+          color: #b8c4d8;
+          font-size: 10px;
+          line-height: 1.5;
+        }
+
+        .ih-connector {
+          margin: 3px 0 3px 13px;
+          color: #a78bfa;
+          font-size: 18px;
+        }
+
+        .ih-features p {
+          display: flex;
+          gap: 9px;
+          margin: 12px 0;
+          color: #d5dceb;
+          font-size: 11px;
+        }
+
+        .ih-features p span { color: #4ade80; font-weight: 900; }
+
+        .ih-skills-card, .ih-data-section {
+          margin-top: 18px;
+          padding: 18px;
+          border: 1px solid #7134b7;
+          border-radius: 15px;
+          background: linear-gradient(145deg, #10172c, #0b1020);
+        }
+
+        .ih-section-heading {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 15px;
+          padding-bottom: 13px;
+          border-bottom: 1px solid #29334c;
+        }
+
+        .ih-section-heading h2, .ih-data-section h2 {
+          margin: 0 0 6px;
+          font-size: 18px;
+        }
+
+        .ih-section-heading p, .ih-muted {
+          margin: 0;
+          color: #94a3b8;
+          font-size: 11px;
+        }
+
+        .ih-skill-total {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          color: #c4b5fd;
+        }
+
+        .ih-skill-total strong { font-size: 23px; }
+        .ih-skill-total small { color: #94a3b8; font-size: 10px; }
+
+        .ih-empty-skills {
+          min-height: 135px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          color: #7c8aa5;
+          text-align: center;
+          font-size: 12px;
+        }
+
+        .ih-empty-skills span { color: #a855f7; font-size: 32px; }
+        .ih-empty-skills p { margin: 0; }
+
+        .ih-skills-body {
+          display: flex;
+          align-items: center;
+          gap: 25px;
+          padding: 18px 0 3px;
+        }
+
+        .ih-skill-circle {
+          flex: 0 0 135px;
+          width: 135px;
+          height: 135px;
+          display: grid;
+          place-items: center;
+          border-radius: 50%;
+          background: conic-gradient(#c026ff, #7c3aed 65%, #312e81);
+          box-shadow: 0 0 24px #7c3aed44;
+          position: relative;
+        }
+
+        .ih-skill-circle::before {
+          content: "";
+          position: absolute;
+          inset: 10px;
+          border-radius: 50%;
+          background: #11172c;
+        }
+
+        .ih-skill-circle div {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+        }
+
+        .ih-skill-circle strong { font-size: 29px; }
+        .ih-skill-circle small { color: #cbd5e1; font-size: 10px; }
+
+        .ih-skill-list {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 13px;
+        }
+
+        .ih-skill-group {
+          display: grid;
+          grid-template-columns: minmax(140px, 180px) 1fr;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .ih-group-name {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          color: #e2e8f0;
+          font-size: 11px;
+        }
+
+        .ih-group-name span {
+          color: #22d3ee;
+          font-size: 17px;
+          font-weight: 900;
+        }
+
+        .ih-tags {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+
+        .ih-tags span, .ih-extra-skill {
+          padding: 6px 9px;
+          border: 1px solid #55409b;
+          border-radius: 8px;
+          background: linear-gradient(135deg, #262052, #171d3c);
+          color: #e9e4ff;
+          font-size: 10px;
+        }
+
+        .ih-extra-skill { display: inline-block; margin: 3px; }
+
+        .ih-results-section { margin-top: 35px; }
+
+        .ih-results-heading {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 15px;
+          margin-bottom: 15px;
+        }
+
+        .ih-results-heading h2 {
+          margin: 0 0 6px;
+          font-size: 22px;
+        }
+
+        .ih-results-heading p {
+          margin: 0;
+          color: #94a3b8;
+          font-size: 12px;
+        }
+
+        .ih-result-count, .ih-match {
+          padding: 7px 12px;
+          border: 1px solid #a855f7;
+          border-radius: 20px;
+          background: #3b1764;
+          color: #e9d5ff;
+          font-size: 11px;
+          font-weight: 800;
+          white-space: nowrap;
+        }
+
+        .ih-recommendations, .ih-application-list {
+          display: flex;
+          flex-direction: column;
+          gap: 11px;
+        }
+
+        .ih-job-card, .ih-application-card {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 18px;
+          padding: 18px;
+          border: 1px solid #293653;
+          border-radius: 12px;
+          background: #0e172b;
+        }
+
+        .ih-job-details { min-width: 0; }
+
+        .ih-job-details h3, .ih-application-heading h3 {
+          margin: 0 0 6px;
+          color: #d8b4fe;
+          font-size: 16px;
+        }
+
+        .ih-job-details p {
+          margin: 5px 0;
+          color: #b8c4d8;
+          font-size: 12px;
+          line-height: 1.6;
+        }
+
+        .ih-job-details .ih-company, .ih-application-heading p {
+          color: #94a3b8;
+        }
+
+        .ih-job-actions {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 9px;
+        }
+
+        .ih-job-actions button {
+          padding: 9px 15px;
+          border: 0;
+          border-radius: 8px;
+          background: #15803d;
+          color: white;
+          font-weight: 800;
+          cursor: pointer;
+        }
+
+        .ih-job-actions button:hover { background: #16a34a; }
+
+        .ih-applied {
+          color: #86efac;
+          font-size: 12px;
+          font-weight: 800;
+        }
+
+        .ih-data-section h2 { color: #c4b5fd; }
+
+        .ih-stipend-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+          gap: 12px;
+          margin-top: 15px;
+        }
+
+        .ih-stipend-card {
+          padding: 15px;
+          border: 1px solid #293653;
+          border-radius: 10px;
+          background: #111c32;
+        }
+
+        .ih-stipend-card strong { font-size: 13px; }
+        .ih-stipend-card p { color: #b8c4d8; font-size: 12px; }
+        .ih-stipend-card p span { color: #4ade80; font-weight: 800; }
+        .ih-stipend-card small { color: #94a3b8; }
+
+        .ih-application-card {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .ih-application-heading {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .ih-application-heading p {
+          margin: 0;
+          font-size: 11px;
+        }
+
+        .ih-application-heading > span {
+          align-self: flex-start;
+          padding: 6px 10px;
+          border: 1px solid #a855f7;
+          border-radius: 20px;
+          color: #e9d5ff;
+          background: #3b0764;
+          font-size: 11px;
+        }
+
+        .ih-history {
+          padding-left: 13px;
+          border-left: 2px solid #475569;
+        }
+
+        .ih-history strong {
+          color: #94a3b8;
+          font-size: 11px;
+        }
+
+        .ih-history p {
+          color: #cbd5e1;
+          font-size: 11px;
+        }
+
+        .ih-history p span { color: #38bdf8; }
+
+        .ih-footer {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 24px 3px 0;
+          color: #64748b;
+          font-size: 11px;
+        }
+
+        .ih-footer strong { color: #c084fc; }
+
+        .ih-spinner {
+          display: inline-block;
+          width: 14px;
+          height: 14px;
+          border: 2px solid #ffffff55;
+          border-top-color: white;
+          border-radius: 50%;
+          animation: ih-spin .7s linear infinite;
+        }
+
+        @keyframes ih-spin {
+          to { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 900px) {
+          .ih-header { flex-wrap: wrap; padding: 12px 4%; }
+          .ih-nav { order: 3; width: 100%; height: 35px; justify-content: center; }
+          .ih-main-grid { grid-template-columns: 1fr; }
+          .ih-sidebar { display: grid; grid-template-columns: 1fr 1fr; }
+        }
+
+        @media (max-width: 600px) {
+          .ih-container { width: 92%; padding-top: 25px; }
+          .ih-hero-art { position: absolute; right: -25px; opacity: .25; }
+          .ih-hero h1 { font-size: 29px; }
+          .ih-hero p { max-width: 270px; font-size: 12px; line-height: 1.6; }
+          .ih-step { min-width: 82px; }
+          .ih-step small { font-size: 9px; }
+          .ih-step-line { min-width: 12px; }
+          .ih-sidebar { display: flex; }
+          .ih-skills-body { flex-direction: column; }
+          .ih-skill-group { grid-template-columns: 1fr; gap: 7px; }
+          .ih-job-card { flex-direction: column; align-items: stretch; }
+          .ih-job-actions { flex-direction: row; align-items: center; justify-content: space-between; }
+          .ih-results-heading { align-items: flex-start; flex-direction: column; }
+          .ih-footer { flex-wrap: wrap; }
+          .ih-nav { justify-content: flex-start; overflow-x: auto; gap: 20px; }
+          .ih-nav a { white-space: nowrap; font-size: 11px; }
+        }
+      `}</style>
+    </main>
+  );
+}
+
+
+
