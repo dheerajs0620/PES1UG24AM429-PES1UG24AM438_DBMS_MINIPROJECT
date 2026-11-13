@@ -9,6 +9,9 @@ export default function RecommendationsPage() {
   const [detailTab, setDetailTab] = useState('overview');
   const [extractedSkills, setExtractedSkills] = useState<string[]>([]);
   const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [hybridResults, setHybridResults] = useState<any[]>([]);
+  const [hybridLoading, setHybridLoading] = useState(false);
+  const [hybridError, setHybridError] = useState('');
   const [myApplications, setMyApplications] = useState<any[]>([]);
   const [stipendStats, setStipendStats] = useState<any[]>([]);
 
@@ -53,7 +56,43 @@ export default function RecommendationsPage() {
     );
   };
 
-  const filteredRecommendations = recommendations
+  // Hybrid search relevance is independent from resume-to-opportunity compatibility.
+  // The API's match_score is the hybrid score; preserve it separately from the
+  // existing resume recommendation score.
+  const toPercent = (raw: any): number | null => {
+    if (raw === null || raw === undefined || raw === '') return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+    return Math.max(0, Math.min(100, value <= 1 ? value * 100 : value));
+  };
+
+  const getHybridMatchPercent = (opportunity: any): number | null =>
+    toPercent(opportunity?.hybrid_match_score ?? opportunity?.match_score);
+
+  const findResumeRecommendation = (opportunity: any): any | null => {
+    const opportunityId = opportunity?.opportunity_id ?? opportunity?.id;
+    if (opportunityId === null || opportunityId === undefined) return null;
+
+    return recommendations.find((recommendation: any) => {
+      const recommendationId =
+        recommendation?.opportunity_id ?? recommendation?.id;
+      return String(recommendationId) === String(opportunityId);
+    }) ?? null;
+  };
+
+  const getResumeMatchPercent = (opportunity: any): number | null => {
+    if (opportunity?.resume_match_score !== undefined) {
+      return toPercent(opportunity.resume_match_score);
+    }
+
+    const resumeRecommendation = findResumeRecommendation(opportunity);
+    return resumeRecommendation ? getMatchPercent(resumeRecommendation) : null;
+  };
+
+  const isHybridSearch = searchTerm.trim().length > 0;
+  const displayedRecommendations = isHybridSearch ? hybridResults : recommendations;
+
+  const filteredRecommendations = displayedRecommendations
     .filter((rec: any) => {
       const haystack = [
         rec.title,
@@ -69,7 +108,11 @@ export default function RecommendationsPage() {
         .join(' ')
         .toLowerCase();
 
-      const matchesSearch = haystack.includes(searchTerm.trim().toLowerCase());
+      // The API has already performed semantic + keyword ranking. Do not
+      // reapply literal substring matching to its results.
+      const matchesSearch = isHybridSearch
+        ? true
+        : haystack.includes(searchTerm.trim().toLowerCase());
       const type = String(rec.opportunity_type || rec.type || '').toLowerCase();
       const mode = String(rec.mode || rec.work_mode || '').toLowerCase();
 
@@ -79,8 +122,12 @@ export default function RecommendationsPage() {
       return matchesSearch && matchesType && matchesMode;
     })
     .sort((a: any, b: any) => {
-      const scoreA = getMatchPercent(a);
-      const scoreB = getMatchPercent(b);
+      const scoreA = isHybridSearch
+        ? getHybridMatchPercent(a)
+        : getMatchPercent(a);
+      const scoreB = isHybridSearch
+        ? getHybridMatchPercent(b)
+        : getMatchPercent(b);
 
       if (scoreA === null && scoreB === null) return 0;
       if (scoreA === null) return 1;
@@ -175,6 +222,63 @@ export default function RecommendationsPage() {
       fetchApplicationsForCandidate(candidateEmail);
     }
   }, [candidateEmail]);
+
+  // Search all opportunities through the hybrid MySQL + pgvector API.
+  // Debouncing avoids sending a Gemini embedding request for every keystroke.
+  useEffect(() => {
+    const query = searchTerm.trim();
+
+    if (!query) {
+      setHybridResults([]);
+      setHybridError('');
+      setHybridLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setHybridLoading(true);
+    setHybridError('');
+
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch('/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          cache: 'no-store',
+          body: JSON.stringify({ searchQuery: query }),
+          signal: controller.signal,
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+          throw new Error(data.error || 'Search failed. Please try again.');
+        }
+
+        if (!controller.signal.aborted) {
+          setHybridResults(
+            Array.isArray(data.results)
+              ? data.results.map((result: any) => ({
+                  ...result,
+                  hybrid_match_score: result.match_score,
+                }))
+              : []
+          );
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setHybridResults([]);
+        setHybridError(err instanceof Error ? err.message : 'Search failed.');
+      } finally {
+        if (!controller.signal.aborted) setHybridLoading(false);
+      }
+    }, 400);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [searchTerm]);
 
   useEffect(() => {
     let active = true;
@@ -3768,7 +3872,7 @@ padding: 10px 13px;
             border-radius: 10px;
           }
         }
-        `}</style>
+      `}</style>
       <style jsx global>{`
 /* INTERNHUB_VISUAL_REFINEMENT_V1 */
 
@@ -5501,13 +5605,19 @@ padding: 10px 13px;
           </div>
 
           <div className="ih-muted" style={{ marginBottom: 12 }}>
-            Showing {visibleRecommendations.length} of {filteredRecommendations.length} opportunities
+            {hybridLoading && isHybridSearch
+              ? 'Searching opportunities using AI…'
+              : `Showing ${visibleRecommendations.length} of ${filteredRecommendations.length} opportunities`}
           </div>
+
+          {isHybridSearch && hybridError && (
+            <div className="ih-error" role="alert">{hybridError}</div>
+          )}
 
           <div className="ih-opportunity-list">
             {visibleRecommendations.length === 0 ? (
               <div className="ih-empty-state">
-                {recommendations.length === 0 ? (
+                {!isHybridSearch && recommendations.length === 0 ? (
                   <div className="mx-auto flex max-w-lg flex-col items-center gap-4">
                     <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-purple-400/30 bg-purple-500/10 text-3xl text-purple-300">
                       ⇧
@@ -5534,18 +5644,46 @@ padding: 10px 13px;
               </div>
             ) : (
               visibleRecommendations.map((opportunity: any, index: number) => {
-                const score = getMatchPercent(opportunity);
+                const resumeRecommendation = isHybridSearch
+                  ? findResumeRecommendation(opportunity)
+                  : opportunity;
+
+                // Merge resume-derived metadata (location, stipend, skill breakdown,
+                // etc.) with the authoritative hybrid-search result. Keep both scores.
+                const cardOpportunity = resumeRecommendation
+                  ? {
+                      ...resumeRecommendation,
+                      ...opportunity,
+                      resume_match_score: isHybridSearch
+                        ? getMatchPercent(resumeRecommendation)
+                        : getMatchPercent(opportunity),
+                    }
+                  : opportunity;
+
+                const hybridScore = isHybridSearch
+                  ? getHybridMatchPercent(opportunity)
+                  : null;
+                const resumeScore = isHybridSearch
+                  ? getResumeMatchPercent(cardOpportunity)
+                  : getMatchPercent(cardOpportunity);
+
+                // Always display the existing resume-to-opportunity compatibility
+                // score on the card. Hybrid relevance is used only to rank search
+                // results and remains available in the /api/search Network response.
+                const score = isHybridSearch
+                  ? getResumeMatchPercent(cardOpportunity)
+                  : getMatchPercent(cardOpportunity);
                 const color = getMatchColor(score);
-                const breakdown = getBreakdown(opportunity);
-                const id = getOpportunityId(opportunity);
-                const company = opportunity.company_name || opportunity.company || 'Company';
-                const skills = getSkillList(opportunity);
+                const breakdown = getBreakdown(cardOpportunity);
+                const id = getOpportunityId(cardOpportunity);
+                const company = cardOpportunity.company_name || cardOpportunity.company || 'Company';
+                const skills = getSkillList(cardOpportunity);
 
                 return (
                   <article className="ih-opportunity-card" key={id ?? index}>
                     <div className="ih-company-logo">
-                      {opportunity.company_logo ? (
-                        <img src={opportunity.company_logo} alt={`${company} logo`} />
+                      {cardOpportunity.company_logo ? (
+                        <img src={cardOpportunity.company_logo} alt={`${company} logo`} />
                       ) : (
                         getCompanyInitial(company)
                       )}
@@ -5556,9 +5694,9 @@ padding: 10px 13px;
                       <div className="ih-company-name">{company}</div>
 
                       <div className="ih-opportunity-meta">
-                        <span>⌖ {opportunity.location || 'Location not specified'}</span>
-                        <span>▣ {getOpportunityDuration(opportunity)}</span>
-                        <span>₹ {getOpportunityStipend(opportunity)}</span>
+                        <span>⌖ {cardOpportunity.location || 'Location not specified'}</span>
+                        <span>▣ {getOpportunityDuration(cardOpportunity)}</span>
+                        <span>₹ {getOpportunityStipend(cardOpportunity)}</span>
                       </div>
 
                       <div className="ih-opportunity-skills">
@@ -5621,7 +5759,7 @@ padding: 10px 13px;
                       <button
                         type="button"
                         className="ih-view-button"
-                        onClick={() => setSelectedOpportunity(opportunity)}
+                        onClick={() => setSelectedOpportunity(cardOpportunity)}
                       >
                         View Details →
                       </button>
@@ -5708,7 +5846,13 @@ padding: 10px 13px;
 
                   <div className="ih-job-badges">
                     <span className="ih-job-match-badge">
-                      {getMatchPercent(selectedOpportunity) === null ? "Match unavailable" : `${Math.round(getMatchPercent(selectedOpportunity)!)}% Match`}
+                      {(isHybridSearch
+                        ? getResumeMatchPercent(selectedOpportunity)
+                        : getMatchPercent(selectedOpportunity)) === null
+                        ? "Resume match unavailable"
+                        : `${Math.round((isHybridSearch
+                            ? getResumeMatchPercent(selectedOpportunity)
+                            : getMatchPercent(selectedOpportunity))!)}% Match`}
                     </span>
 
                     {selectedOpportunity.is_featured === true && (
@@ -5886,13 +6030,13 @@ padding: 10px 13px;
                               className="ih-large-match-ring"
                               style={{
                                 background: `conic-gradient(#14e89b ${
-                                  (getMatchPercent(selectedOpportunity) ?? 0) * 3.6
+                                  ((isHybridSearch ? getResumeMatchPercent(selectedOpportunity) : getMatchPercent(selectedOpportunity)) ?? 0) * 3.6
                                 }deg, #273752 0deg)`,
                               }}
                             >
                               <div>
                                 <strong>
-                                  {getMatchPercent(selectedOpportunity) === null ? "N/A" : `${Math.round(getMatchPercent(selectedOpportunity)!)}%`}
+                                  {(isHybridSearch ? getResumeMatchPercent(selectedOpportunity) : getMatchPercent(selectedOpportunity)) === null ? "N/A" : `${Math.round((isHybridSearch ? getResumeMatchPercent(selectedOpportunity) : getMatchPercent(selectedOpportunity))!)}%`}
                                 </strong>
                               </div>
                             </div>
@@ -5973,7 +6117,7 @@ padding: 10px 13px;
 
                     <div className="ih-requirement-score">
                       <strong>
-                        {getMatchPercent(selectedOpportunity) === null ? "N/A" : `${Math.round(getMatchPercent(selectedOpportunity)!)}%`}
+                        {(isHybridSearch ? getResumeMatchPercent(selectedOpportunity) : getMatchPercent(selectedOpportunity)) === null ? "N/A" : `${Math.round((isHybridSearch ? getResumeMatchPercent(selectedOpportunity) : getMatchPercent(selectedOpportunity))!)}%`}
                       </strong>
                       <span>Overall Match</span>
                     </div>
@@ -6133,20 +6277,3 @@ padding: 10px 13px;
     </main>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

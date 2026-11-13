@@ -1,4 +1,3 @@
-
 import { GoogleGenAI } from '@google/genai';
 
 const DIMENSIONS = 1536;
@@ -11,6 +10,7 @@ export async function generateEmbedding(
   content: string,
   taskType: EmbeddingTask = 'RETRIEVAL_DOCUMENT'
 ): Promise<number[]> {
+
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
